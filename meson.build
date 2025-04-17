@@ -5,6 +5,9 @@ project('gst-cudakernel', 'c',
                       'c_std=c11' ]
 )
 
+# Include configuration directory
+conf_inc = include_directories('src/config')
+
 gst_req = '>= 1.20.0'
 json_glib_dep = dependency('json-glib-1.0')
 gst_dep = [
@@ -28,10 +31,11 @@ plugin_sources = [
 library('gstcudakernel',
   plugin_sources,
   dependencies : [gst_dep, json_glib_dep, cuda_dep],
+  include_directories : [conf_inc],  # Add config directory
   install : true,
   install_dir : join_paths(get_option('libdir'), 'gstreamer-1.0'),
   c_args : [
     '-DHAVE_CONFIG_H',
-    '-DGST_CUDA_META_API_TYPE=123',  # Placeholder for actual API type
+    '-DGST_CUDA_META_API_TYPE=123',
   ]
 )
