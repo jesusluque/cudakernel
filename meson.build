@@ -9,7 +9,15 @@ project('gst-cudakernel', 'c',
 conf_inc = include_directories('src/config')
 
 gst_req = '>= 1.20.0'
-json_glib_dep = dependency('json-glib-1.0')
+
+# Try to find JSON-GLib, but make it optional
+json_glib_dep = dependency('json-glib-1.0', required : false)
+if not json_glib_dep.found()
+  message('JSON-GLib not found! Plugin will be built without JSON parameter support.')
+  # Define a preprocessor symbol to disable JSON support
+  add_project_arguments('-DNO_JSON_GLIB', language: 'c')
+endif
+
 gst_dep = [
   dependency('gstreamer-1.0', version : gst_req),
   dependency('gstreamer-base-1.0', version : gst_req),
@@ -39,9 +47,28 @@ if host_system == 'windows'
   cuda_lib_dirs = [cuda_root + '\\lib\\x64']
   
   # Windows-specific installation path for GStreamer plugins
-  plugin_install_dir = get_option('libdir') != '' ? get_option('libdir') : 'lib'
-  plugin_install_dir = plugin_install_dir + '\\gstreamer-1.0'
+  # For Windows, normalize the path to use only backslashes
+  libdir = get_option('libdir')
+  if libdir == ''
+    libdir = 'lib'
+  endif
   
+  # Handle mixed path separators - convert any forward slashes to backslashes
+  if libdir.contains('/')
+    elems = libdir.split('/')
+    libdir = '\\'.join(elems)
+  endif
+  
+  # If absolute path with drive letter, keep it, otherwise make relative
+  if not libdir.contains(':')
+    # This is a relative path, it's fine as is
+    plugin_install_dir = libdir + '\\gstreamer-1.0'
+  else
+    # This is an absolute path, normalize the path separators
+    plugin_install_dir = libdir + '\\gstreamer-1.0'
+  endif
+  
+  message('Windows plugin install directory: ' + plugin_install_dir)
 else
   # Linux paths
   if cc.has_header('cuda.h', args: '-I/usr/local/cuda/include')
@@ -84,6 +111,11 @@ plugin_sources = [
   'src/gstcudakernel.c',
 ]
 
+deps = [gst_dep, cuda_dep, cudart_lib]
+if json_glib_dep.found()
+  deps += [json_glib_dep]
+endif
+
 shared_library_name = 'gstcudakernel'
 if host_system == 'windows'
   shared_library_name = 'libgstcudakernel'
@@ -91,7 +123,7 @@ endif
 
 library(shared_library_name,
   plugin_sources,
-  dependencies : [gst_dep, json_glib_dep, cuda_dep, cudart_lib],
+  dependencies : deps,
   include_directories : [conf_inc],
   install : true,
   install_dir : plugin_install_dir,
