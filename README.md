@@ -154,5 +154,16 @@ gst-cudakernel/              # Main project directory
    ninja
    sudo ninja install  # System-wide installation
    ```
+# Example use:
 
-This structure keeps everything organized while making it clear how the different components relate to each other in the implementation.
+**edge_detect**
+```bash
+gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=edge_detect kernel-parameters="{\"threshold\": 50}" ! videoconvert ! autovideosin
+```
+
+
+**blur**
+```bash
+gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=blur kernel-parameters="{\"radius\": 50}" ! videoconvert ! autovideosink
+```
+
