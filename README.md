@@ -59,25 +59,16 @@ The plugin loads kernel code from PTX or CUBIN files, allowing you to:
 
 ## Usage Examples
 
-### Basic Pipeline
+
+**edge_detect**
 ```bash
-gst-launch-1.0 videotestsrc ! videoconvert ! video/x-raw,format=RGBA ! \
-    cudakernel kernel-path=kernels.ptx kernel-function=grayscale ! \
-    videoconvert ! autovideosink
+gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=edge_detect kernel-parameters="{\"threshold\": 50}" ! videoconvert ! autovideosin
 ```
 
-### With Parameters
-```bash
-gst-launch-1.0 v4l2src ! videoconvert ! video/x-raw,format=RGBA ! \
-    cudakernel kernel-path=kernels.ptx kernel-function=blur kernel-parameters='{"radius":5}' ! \
-    videoconvert ! autovideosink
-```
 
-### Zero-copy with NVIDIA Hardware Decoders
+**blur**
 ```bash
-gst-launch-1.0 filesrc location=video.mp4 ! nvh264dec ! cudaupload ! \
-    cudakernel kernel-path=kernels.ptx kernel-function=edge_detect kernel-parameters='{"threshold":50}' ! \
-    cudadownload ! videoconvert ! autovideosink
+gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=blur kernel-parameters="{\"radius\": 50}" ! videoconvert ! autovideosink
 ```
 
 This implementation bridges the powerful parallel processing capabilities of CUDA with GStreamer's flexible media framework, enabling efficient video processing for a wide range of applications from simple filters to complex computer vision systems.
@@ -154,16 +145,5 @@ gst-cudakernel/              # Main project directory
    ninja
    sudo ninja install  # System-wide installation
    ```
-# Example use:
 
-**edge_detect**
-```bash
-gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=edge_detect kernel-parameters="{\"threshold\": 50}" ! videoconvert ! autovideosin
-```
-
-
-**blur**
-```bash
-gst-launch-1.0 videotestsrc ! video/x-raw,format=RGBA ! cudakernel kernel-path=kernels.ptx kernel-function=blur kernel-parameters="{\"radius\": 50}" ! videoconvert ! autovideosink
-```
 
