@@ -28,11 +28,6 @@ I've created a comprehensive solution for dynamically loading and executing CUDA
    - Instructions for compiling CUDA kernels into PTX/CUBIN format
    - GStreamer pipeline examples for different use cases
 
-4. **Real-world Application Example**
-   - A complete Python application with GTK GUI
-   - Demonstrates switching between effects at runtime
-   - Supports both video files and webcam input
-   - Interactive parameter controls
 
 ## Key Features
 
