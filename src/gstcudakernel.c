@@ -4,8 +4,8 @@
  * This plugin loads and executes CUDA kernels at runtime within a GStreamer pipeline.
  * It supports loading PTX or CUBIN files and executing arbitrary kernel functions.
  *
- * Author: Claude
- * License: LGPL-2.1
+ * Author: Jesus Luque (Claude)
+ * License: custom
  */
 
 #ifdef HAVE_CONFIG_H
@@ -195,13 +195,17 @@ static gboolean gst_cuda_kernel_ensure_pinned_buffer (GstCudaKernel * filter,
     size_t size, void **pinned_ptr, size_t *current_size);
 static gboolean gst_cuda_kernel_check_memory_availability (GstCudaKernel * filter, size_t required_size);
 
+/* CUDA context management helper */
+static gboolean gst_cuda_kernel_push_context (GstCudaKernel * filter, CUcontext *old_ctx);
+static gboolean gst_cuda_kernel_pop_context (GstCudaKernel * filter, CUcontext old_ctx);
+
 /* Plugin registration */
 static gboolean plugin_init (GstPlugin * plugin);
 
 /* Define plugin */
 #define PLUGIN_NAME "cudakernel"
 #define PLUGIN_DESC "CUDA Kernel Element"
-#define PLUGIN_VERSION "1.0.2"  /* Bumped version number */
+#define PLUGIN_VERSION "1.0.3"  /* Bumped version number */
 
 /* Implementation starts here */
 
@@ -264,7 +268,7 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
       "CUDA Kernel Processor",
       "Filter/Effect/Video",
       "Applies custom CUDA kernels to video frames",
-      "Claude <claude@anthropic.com>");
+      "Claude <jluque@mediapro.tv>");
   
   /* Configure pad templates */
   gst_element_class_add_pad_template (element_class,
@@ -335,7 +339,11 @@ gst_cuda_kernel_dispose (GObject * object)
   gst_cuda_kernel_cleanup_pinned_memory (filter);
   
   if (filter->cu_stream) {
-    cuStreamDestroy(filter->cu_stream);
+    CUcontext old_ctx;
+    if (gst_cuda_kernel_push_context(filter, &old_ctx)) {
+      cuStreamDestroy(filter->cu_stream);
+      gst_cuda_kernel_pop_context(filter, old_ctx);
+    }
     filter->cu_stream = NULL;
   }
   
@@ -547,6 +555,8 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   CUdeviceptr d_in = 0, d_out = 0;
   CUresult result;
   gboolean allocated_device_memory = FALSE;
+  CUcontext old_ctx = NULL;
+  gboolean context_pushed = FALSE;
   
   /* If no module is loaded or no kernel function set, just passthrough */
   if (!filter->cu_module || !filter->cu_function) {
@@ -603,6 +613,17 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
       }
     }
     
+    /* PUSH CONTEXT - We need to make CUDA context current before any operations */
+    if (!gst_cuda_kernel_push_context(filter, &old_ctx)) {
+      GST_ERROR_OBJECT (filter, "Failed to push CUDA context");
+      gst_buffer_unmap (inbuf, &in_map);
+      if (inbuf != outbuf) {
+        gst_buffer_unmap (outbuf, &out_map);
+      }
+      return GST_FLOW_ERROR;
+    }
+    context_pushed = TRUE;
+    
     /* Check if we have enough GPU memory */
     size_t buffer_size = in_map.size;
     size_t total_required = buffer_size;
@@ -622,6 +643,7 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
         gst_buffer_unmap (outbuf, &out_map);
       }
       gst_buffer_unmap (inbuf, &in_map);
+      gst_cuda_kernel_pop_context(filter, old_ctx);
       return GST_FLOW_OK;
     }
     
@@ -633,6 +655,7 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
       if (inbuf != outbuf) {
         gst_buffer_unmap (outbuf, &out_map);
       }
+      gst_cuda_kernel_pop_context(filter, old_ctx);
       
       GST_WARNING_OBJECT (filter, "Failed to allocate GPU memory (%d bytes): %d - falling back to passthrough", 
           (int)buffer_size, result);
@@ -653,6 +676,7 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
         cuMemFree(d_in);
         gst_buffer_unmap (inbuf, &in_map);
         gst_buffer_unmap (outbuf, &out_map);
+        gst_cuda_kernel_pop_context(filter, old_ctx);
         
         GST_WARNING_OBJECT (filter, "Failed to allocate GPU output memory: %d - falling back to passthrough", result);
         
@@ -693,6 +717,7 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
           if (inbuf != outbuf) {
             gst_buffer_unmap (outbuf, &out_map);
           }
+          gst_cuda_kernel_pop_context(filter, old_ctx);
           GST_ERROR_OBJECT (filter, "Failed to upload data to GPU: %d", result);
           return GST_FLOW_ERROR;
         }
@@ -718,6 +743,7 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
           if (inbuf != outbuf) {
             gst_buffer_unmap (outbuf, &out_map);
           }
+          gst_cuda_kernel_pop_context(filter, old_ctx);
           GST_ERROR_OBJECT (filter, "Failed to upload data to GPU: %d", result);
           return GST_FLOW_ERROR;
         }
@@ -734,10 +760,24 @@ gst_cuda_kernel_transform (GstBaseTransform * trans, GstBuffer * inbuf,
         if (inbuf != outbuf) {
           gst_buffer_unmap (outbuf, &out_map);
         }
+        gst_cuda_kernel_pop_context(filter, old_ctx);
         GST_ERROR_OBJECT (filter, "Failed to upload data to GPU: %d", result);
         return GST_FLOW_ERROR;
       }
     }
+  }
+  
+  /* For CUDA memory, we need to push context at this point */
+  if (filter->has_cuda_memory && !context_pushed) {
+    if (!gst_cuda_kernel_push_context(filter, &old_ctx)) {
+      GST_ERROR_OBJECT (filter, "Failed to push CUDA context for kernel launch");
+      if (inbuf != outbuf) {
+        gst_buffer_unmap (outbuf, &out_map);
+      }
+      gst_buffer_unmap (inbuf, &in_map);
+      return GST_FLOW_ERROR;
+    }
+    context_pushed = TRUE;
   }
   
   /* Prepare parameters for kernel launch */
@@ -904,6 +944,11 @@ cleanup:
     }
   }
   
+  /* Pop CUDA context if we pushed it earlier */
+  if (context_pushed) {
+    gst_cuda_kernel_pop_context(filter, old_ctx);
+  }
+  
   if (!filter->has_cuda_memory) {
     if (inbuf != outbuf) {
       gst_buffer_unmap(outbuf, &out_map);
@@ -1028,15 +1073,19 @@ gst_cuda_kernel_init_cuda (GstCudaKernel * filter)
   }
   
   /* Get available memory info */
-  result = cuMemGetInfo(&filter->available_memory, &filter->total_memory);
-  if (result != CUDA_SUCCESS) {
-    GST_WARNING_OBJECT (filter, "Failed to get memory information: %d", result);
-    /* Not fatal, continue with unknown memory stats */
-    filter->available_memory = 0;
-    filter->total_memory = 0;
-  } else {
-    GST_INFO_OBJECT (filter, "GPU Memory: Available %zu bytes of %zu bytes total",
-        filter->available_memory, filter->total_memory);
+  CUcontext old_ctx;
+  if (gst_cuda_kernel_push_context(filter, &old_ctx)) {
+    result = cuMemGetInfo(&filter->available_memory, &filter->total_memory);
+    if (result != CUDA_SUCCESS) {
+      GST_WARNING_OBJECT (filter, "Failed to get memory information: %d", result);
+      /* Not fatal, continue with unknown memory stats */
+      filter->available_memory = 0;
+      filter->total_memory = 0;
+    } else {
+      GST_INFO_OBJECT (filter, "GPU Memory: Available %zu bytes of %zu bytes total",
+          filter->available_memory, filter->total_memory);
+    }
+    gst_cuda_kernel_pop_context(filter, old_ctx);
   }
   
   /* Log success */
@@ -1053,6 +1102,7 @@ gst_cuda_kernel_load_module (GstCudaKernel * filter)
 {
   CUresult result;
   GError *error = NULL;
+  CUcontext old_ctx = NULL;
   
   /* Check parameters */
   if (!filter->cuda_initialized) {
@@ -1124,17 +1174,29 @@ gst_cuda_kernel_load_module (GstCudaKernel * filter)
   g_free(normalized_path);
 #endif
   
+  /* Push CUDA context before operations */
+  if (!gst_cuda_kernel_push_context(filter, &old_ctx)) {
+    GST_ERROR_OBJECT (filter, "Failed to push CUDA context for module loading");
+    g_free (ptx_data);
+    return FALSE;
+  }
+  
   /* Create module */
   result = cuModuleLoadData(&filter->cu_module, ptx_data);
   g_free (ptx_data);
   
   if (result != CUDA_SUCCESS) {
+    gst_cuda_kernel_pop_context(filter, old_ctx);
     GST_ERROR_OBJECT (filter, "Failed to load CUDA module: %d", result);
     return FALSE;
   }
   
   /* Get function */
   result = cuModuleGetFunction(&filter->cu_function, filter->cu_module, filter->kernel_function);
+  
+  /* Pop context */
+  gst_cuda_kernel_pop_context(filter, old_ctx);
+  
   if (result != CUDA_SUCCESS) {
     GST_ERROR_OBJECT (filter, "Failed to get kernel function '%s': %d", 
         filter->kernel_function, result);
@@ -1156,7 +1218,14 @@ gst_cuda_kernel_unload_module (GstCudaKernel * filter)
 {
   /* Unload any existing module */
   if (filter->cu_module) {
-    cuModuleUnload(filter->cu_module);
+    CUcontext old_ctx;
+    if (gst_cuda_kernel_push_context(filter, &old_ctx)) {
+      cuModuleUnload(filter->cu_module);
+      gst_cuda_kernel_pop_context(filter, old_ctx);
+    } else {
+      /* Try without context management as a fallback */
+      cuModuleUnload(filter->cu_module);
+    }
     filter->cu_module = NULL;
     filter->cu_function = NULL;
   }
@@ -1334,17 +1403,36 @@ gst_cuda_kernel_reload_if_needed (GstCudaKernel * filter)
 static void
 gst_cuda_kernel_cleanup_pinned_memory (GstCudaKernel * filter)
 {
-  /* Free any allocated pinned memory */
-  if (filter->pinned_input) {
-    cuMemFreeHost(filter->pinned_input);
-    filter->pinned_input = NULL;
-    filter->pinned_input_size = 0;
-  }
-  
-  if (filter->pinned_output) {
-    cuMemFreeHost(filter->pinned_output);
-    filter->pinned_output = NULL;
-    filter->pinned_output_size = 0;
+  /* Push context for CUDA operations */
+  CUcontext old_ctx;
+  if (filter->cu_ctx && gst_cuda_kernel_push_context(filter, &old_ctx)) {
+    /* Free any allocated pinned memory */
+    if (filter->pinned_input) {
+      cuMemFreeHost(filter->pinned_input);
+      filter->pinned_input = NULL;
+      filter->pinned_input_size = 0;
+    }
+    
+    if (filter->pinned_output) {
+      cuMemFreeHost(filter->pinned_output);
+      filter->pinned_output = NULL;
+      filter->pinned_output_size = 0;
+    }
+    
+    gst_cuda_kernel_pop_context(filter, old_ctx);
+  } else {
+    /* Try without context management as fallback */
+    if (filter->pinned_input) {
+      cuMemFreeHost(filter->pinned_input);
+      filter->pinned_input = NULL;
+      filter->pinned_input_size = 0;
+    }
+    
+    if (filter->pinned_output) {
+      cuMemFreeHost(filter->pinned_output);
+      filter->pinned_output = NULL;
+      filter->pinned_output_size = 0;
+    }
   }
 }
 
@@ -1352,6 +1440,8 @@ static gboolean
 gst_cuda_kernel_ensure_pinned_buffer (GstCudaKernel * filter, 
     size_t size, void **pinned_ptr, size_t *current_size)
 {
+  /* Context must already be pushed before calling this function */
+  
   /* If we already have a buffer of sufficient size, reuse it */
   if (*pinned_ptr && *current_size >= size) {
     return TRUE;
@@ -1391,6 +1481,8 @@ gst_cuda_kernel_ensure_pinned_buffer (GstCudaKernel * filter,
 static gboolean
 gst_cuda_kernel_check_memory_availability (GstCudaKernel * filter, size_t required_size)
 {
+  /* Context should already be pushed before calling this function */
+  
   /* If we don't have memory info, update it */
   if (filter->available_memory == 0 || filter->total_memory == 0) {
     CUresult result = cuMemGetInfo(&filter->available_memory, &filter->total_memory);
@@ -1414,6 +1506,45 @@ gst_cuda_kernel_check_memory_availability (GstCudaKernel * filter, size_t requir
   return TRUE;
 }
 
+/* CUDA context management helpers */
+static gboolean 
+gst_cuda_kernel_push_context (GstCudaKernel * filter, CUcontext *old_ctx)
+{
+  if (!filter->cu_ctx) {
+    GST_ERROR_OBJECT(filter, "No CUDA context available to push");
+    return FALSE;
+  }
+  
+  CUresult result = cuCtxPushCurrent(filter->cu_ctx);
+  if (result != CUDA_SUCCESS) {
+    GST_ERROR_OBJECT(filter, "Failed to push CUDA context: %d", result);
+    return FALSE;
+  }
+  
+  /* Get the old context which will be returned by pop */
+  result = cuCtxGetCurrent(old_ctx);
+  if (result != CUDA_SUCCESS) {
+    GST_WARNING_OBJECT(filter, "Failed to get current CUDA context: %d", result);
+    /* Not fatal, just means we won't know what to restore later */
+    *old_ctx = NULL;
+  }
+  
+  return TRUE;
+}
+
+static gboolean 
+gst_cuda_kernel_pop_context (GstCudaKernel * filter, CUcontext old_ctx)
+{
+  CUcontext popped_ctx;
+  CUresult result = cuCtxPopCurrent(&popped_ctx);
+  if (result != CUDA_SUCCESS) {
+    GST_ERROR_OBJECT(filter, "Failed to pop CUDA context: %d", result);
+    return FALSE;
+  }
+  
+  return TRUE;
+}
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
@@ -1431,5 +1562,5 @@ GST_PLUGIN_DEFINE (
     PLUGIN_VERSION,
     "LGPL",
     "GStreamer",
-    "https://gstreamer.freedesktop.org/"
+    "https://overon.es/"
 )

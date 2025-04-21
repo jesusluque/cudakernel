@@ -11,8 +11,8 @@
 
 /* Plugin description */
 #define GST_PACKAGE_NAME "GStreamer CUDA kernel elements"
-#define GST_PACKAGE_ORIGIN "https://gstreamer.freedesktop.org"
-#define GST_LICENSE "LGPL"
+#define GST_PACKAGE_ORIGIN "https://overo.es"
+#define GST_LICENSE "custom"
 
 /* Define missing CUDA constants for GStreamer */
 #ifndef GST_CUDA_META_API_TYPE
